@@ -6,7 +6,7 @@
 /*   By: Pablo Escobar <sataniv.rider@gmail.com>    +#+  +:+       +#+        */
 /*                                                +#+#+#+#+#+   +#+           */
 /*   Created: 2025/09/30 21:15:11 by Pablo Escob       #+#    #+#             */
-/*   Updated: 2025/10/14 00:51:24 by Pablo Escob      ###   ########.fr       */
+/*   Updated: 2025/10/20 22:52:58 by Pablo Escob      ###   ########.fr       */
 /*                                                                            */
 /* ************************************************************************** */
 
@@ -139,7 +139,7 @@ payload_t get_payload(char* buffer)
 
 icmp_te_t* parse_icmp_message(char* buffer, int data_size)
 {
-	icmp_te_t* icmp_te = new icmp_te_t();
+	icmp_te_t* icmp_msg = new icmp_te_t();
 	int icmp_hdr_offset = 0;
 	int ip_orig_hdr_offset = 0;
 	int udp_orig_hdr_offset = 0;
@@ -147,27 +147,27 @@ icmp_te_t* parse_icmp_message(char* buffer, int data_size)
 
 	if (!buffer)
 		return nullptr;
-	icmp_te->ip_router_hdr = reinterpret_cast<iphdr_t *>(buffer);
-	icmp_hdr_offset = icmp_te->ip_router_hdr->ihl * 4;
-	icmp_te->icmp_header = reinterpret_cast<icmphdr_t *>(buffer + icmp_hdr_offset);
+	icmp_msg->ip_router_hdr = reinterpret_cast<iphdr_t *>(buffer);
+	icmp_hdr_offset = icmp_msg->ip_router_hdr->ihl * 4;
+	icmp_msg->icmp_header = reinterpret_cast<icmphdr_t *>(buffer + icmp_hdr_offset);
 	ip_orig_hdr_offset = icmp_hdr_offset + sizeof(icmphdr_t);
-	icmp_te->ip_original_hdr = reinterpret_cast<iphdr_t *>(buffer + ip_orig_hdr_offset);
-	udp_orig_hdr_offset = ip_orig_hdr_offset + icmp_te->ip_original_hdr->ihl * 4;
-	icmp_te->udp_original_hdr = reinterpret_cast<udphdr_t *>(buffer + udp_orig_hdr_offset);
+	icmp_msg->ip_original_hdr = reinterpret_cast<iphdr_t *>(buffer + ip_orig_hdr_offset);
+	udp_orig_hdr_offset = ip_orig_hdr_offset + icmp_msg->ip_original_hdr->ihl * 4;
+	icmp_msg->udp_original_hdr = reinterpret_cast<udphdr_t *>(buffer + udp_orig_hdr_offset);
 	payload_offset = udp_orig_hdr_offset + sizeof(udphdr_t);
 	if (payload_offset < data_size)
-		icmp_te->payload = get_payload(buffer + payload_offset);
-	return icmp_te;
+		icmp_msg->payload = get_payload(buffer + payload_offset);
+	return icmp_msg;
 }
 
-e_icmp_t check_icmp_answer(icmp_te_t& icmp_te, sockaddr_in_t& addr, int base_port, int ttl)
+e_icmp_t check_icmp_answer(icmp_te_t& icmp_msg, sockaddr_in_t& addr, int base_port, int ttl)
 {
-	if (icmp_te.ip_original_hdr->daddr == addr.sin_addr.s_addr
-			&& icmp_te.udp_original_hdr->dest == htons(base_port + ttl))
+	if (icmp_msg.ip_original_hdr->daddr == addr.sin_addr.s_addr
+			&& icmp_msg.udp_original_hdr->dest == htons(base_port + ttl))
 	{
-		if (icmp_te.icmp_header->type == ICMP_TIME_EXCEEDED && icmp_te.icmp_header->code == ICMP_EXC_TTL)
+		if (icmp_msg.icmp_header->type == ICMP_TIME_EXCEEDED && icmp_msg.icmp_header->code == ICMP_EXC_TTL)
 			return E_ICMP_TTL;
-		if (icmp_te.icmp_header->type == ICMP_DEST_UNREACH && icmp_te.icmp_header->code == ICMP_PORT_UNREACH)
+		if (icmp_msg.icmp_header->type == ICMP_DEST_UNREACH && icmp_msg.icmp_header->code == ICMP_PORT_UNREACH)
 			return E_ICMP_REACHED;
 	}
 	return E_ICMP_ERR;
@@ -221,12 +221,12 @@ char* ip_to_hostname(uint32_t ip_addr)
 	return nullptr;
 }
 
-void print_icmp_info(icmp_te_t& icmp_te, int ttl)
+void print_icmp_info(icmp_te_t& icmp_msg, int ttl)
 {
-	char* hostname = ip_to_hostname(icmp_te.ip_router_hdr->saddr);
+	char* hostname = ip_to_hostname(icmp_msg.ip_router_hdr->saddr);
 	in_addr ip_addr {};
 	
-	ip_addr.s_addr= icmp_te.ip_router_hdr->saddr;
+	ip_addr.s_addr= icmp_msg.ip_router_hdr->saddr;
 	cout << "HOP IP[" << ttl << "]: " << inet_ntoa(ip_addr);
 	if (hostname)
 		cout << " [" << hostname << "]";
@@ -234,10 +234,20 @@ void print_icmp_info(icmp_te_t& icmp_te, int ttl)
 	delete[] hostname;
 }
 
+void handle_icmp_data(icmp_te_t icmp_msg, char* buffer, const int msg_len)
+{
+	icmp_msg = parse_icmp_message(buffer, msg_len);
+	icmp_status = check_icmp_answer(*icmp_msg, addr, base_port, ttl);
+	if (icmp_status == E_ICMP_REACHED)
+		break;
+	if (icmp_status == E_ICMP_TTL)
+		print_icmp_info(*icmp_msg, ttl);
+}
+
 void proccess_icmp_msg(socket_fd_t& sockets, sockaddr_in_t& addr, int base_port, int max_ttl = 30)
 {
 	const int buffer_size = BUFFER_SIZE;
-	icmp_te_t* icmp_te = nullptr;
+	icmp_te_t* icmp_msg = nullptr;
 	char *buffer = new char[buffer_size];
 	e_icmp_t icmp_status;
 	int msg_len = 0;
@@ -248,15 +258,14 @@ void proccess_icmp_msg(socket_fd_t& sockets, sockaddr_in_t& addr, int base_port,
 		msg_len = recieve_icmp(addr, sockets.icmp_recv_fd, buffer, buffer_size);
 		if (msg_len > 0)
 		{
-			icmp_te = parse_icmp_message(buffer, msg_len);
-			icmp_status = check_icmp_answer(*icmp_te, addr, base_port, ttl);
+			icmp_msg = parse_icmp_message(buffer, msg_len);
+			icmp_status = check_icmp_answer(*icmp_msg, addr, base_port, ttl);
 			if (icmp_status == E_ICMP_REACHED)
 				break;
 			if (icmp_status == E_ICMP_TTL)
-				print_icmp_info(*icmp_te, ttl);
+				print_icmp_info(*icmp_msg, ttl);
 		}
-		delete icmp_te;
-		icmp_te = nullptr;
+		delete icmp_msg;
 		memset(buffer, 0, buffer_size);
 	}
 	delete[] buffer;
